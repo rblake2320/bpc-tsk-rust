@@ -797,7 +797,11 @@ where
         }
 
         let tsk_result = match self.tsk.verify(&request.tsk_request_data()) {
-            Ok(result) if result.ok => result,
+            Ok(result)
+                if result.ok && result.client_id.as_deref() == Some(binding.tsk_client_id()) =>
+            {
+                result
+            }
             _ => {
                 return self.deny(
                     &request,
@@ -952,6 +956,24 @@ mod tests {
         }
     }
 
+    struct WrongClientTsk;
+
+    impl TskRequestVerifier for WrongClientTsk {
+        fn verify(
+            &self,
+            _request: &tsk::RequestData,
+        ) -> Result<tsk::VerifyResult, TskVerifierError> {
+            Ok(tsk::VerifyResult {
+                ok: true,
+                client_id: Some("different_client".to_owned()),
+                error: None,
+                rotation_required: false,
+                requests_remaining: None,
+                hotp_counters_remaining: None,
+            })
+        }
+    }
+
     fn request(headers: impl IntoIterator<Item = (String, String)>) -> ImmutableRequest {
         ImmutableRequest::capture(
             Uuid::nil(),
@@ -1067,6 +1089,26 @@ mod tests {
         ));
         assert_eq!(bpc.calls.load(Ordering::SeqCst), 1);
         assert_eq!(tsk.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn malformed_tsk_success_for_a_different_identity_is_denied() {
+        let bpc = StubBpc::allowed();
+        let bindings = MemoryBindingStore::default();
+        bindings
+            .activate("pair_test", "tsk_client", "principal")
+            .unwrap();
+        let bridge = CombinedVerifier::new(
+            &bpc,
+            &bindings,
+            WrongClientTsk,
+            NoopAuditSink,
+            AuditContextKey::new([8_u8; 32]),
+        );
+        assert!(matches!(
+            bridge.verify(request(headers())),
+            PublicDecision::Denied { .. }
+        ));
     }
 
     #[test]
