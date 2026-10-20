@@ -1,0 +1,20 @@
+[package]
+name = "bpc-tsk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "BPC-first, TSK-second authorization composition core"
+
+[dependencies]
+bpc-protocol.workspace = true
+tsk-rust-protocol.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

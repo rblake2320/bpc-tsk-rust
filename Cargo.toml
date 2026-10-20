@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/bpc-tsk-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+repository = "https://github.com/rblake2320/bpc-tsk-rust"
+publish = false
+
+[workspace.dependencies]
+bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "7173a5a13ce0fe962c02d957fcfde126c90e25cd", default-features = false }
+tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "2dcded8eba3a8c09a7ffdbc74e8f05b2829b34d0" }
+hmac = "0.12.1"
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+module_name_repetitions = "allow"
