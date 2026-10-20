@@ -9,6 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+/// Axum middleware that performs bounded byte-exact capture and generic
+/// BPC-first/TSK-second route admission. Enable with `axum-adapter`.
+#[cfg(feature = "axum-adapter")]
+pub mod axum_adapter;
+
 use std::{
     collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind},

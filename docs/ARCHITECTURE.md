@@ -22,6 +22,8 @@ The bridge depends on pinned releases of the standalone BPC and TSK crates. It h
 
 A production HTTP adapter must not use the BPC Axum middleware directly for bridge routes, because the standalone middleware intentionally exposes BPC-specific public error codes. The bridge owns generic response mapping.
 
+The optional `axum-adapter` feature supplies that bridge-owned admission middleware. It collects every raw header value, bounds body collection, captures the exact method/path-and-query/body tuple, calls the bridge before the protected handler, and places only `CombinedAuthSnapshot` in request extensions. It replaces any handler-supplied TSK response-control headers with the verified TSK values. Mount it outside decompression, URI rewrite, retry, and request-normalizing middleware. TLS termination, request-smuggling defense, connection/body timeouts, trusted-proxy configuration, WAF/DDoS controls, and rate limits remain deployment responsibilities and are release gates.
+
 ## Deployment topology
 
 BPC replay/fencing and BPC key lifecycle remain within the BPC authority. TSK HOTP authority, credential lifecycle, and HA remain within the TSK authority. PostgreSQL in the bridge owns only bindings, audit intent/outbox, and application-facing authorization decisions. Redis is not a bridge binding source of truth. It may be used only where the BPC or future TSK authority already owns the corresponding replay/fencing semantics.

@@ -17,6 +17,7 @@ hmac = "0.12.1"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["v4"] }
+axum = { version = "0.8.8", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
