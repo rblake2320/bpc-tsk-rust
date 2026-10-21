@@ -101,7 +101,7 @@ dependencies = [
 [[package]]
 name = "bpc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rblake2320/bpc-rust-protocol?rev=061c53efa294ba9e3a2df4bdfb6f5f6815946cbe#061c53efa294ba9e3a2df4bdfb6f5f6815946cbe"
+source = "git+https://github.com/rblake2320/bpc-rust-protocol?rev=3d795806ca68dea9181a60a253029967584ea3e7#3d795806ca68dea9181a60a253029967584ea3e7"
 dependencies = [
  "base64",
  "hkdf",
@@ -126,7 +126,9 @@ dependencies = [
  "rustls",
  "sha2 0.10.9",
  "thiserror",
+ "tokio",
  "tokio-postgres-rustls",
+ "tower",
  "tsk-rust-protocol",
  "uuid",
 ]
@@ -1263,7 +1265,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 [[package]]
 name = "tsk-rust-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rblake2320/tsk-rust-protocol?rev=0250e92548f2e55336a9f3720af446bf4d77f896#0250e92548f2e55336a9f3720af446bf4d77f896"
+source = "git+https://github.com/rblake2320/tsk-rust-protocol?rev=8b855f6d864176a8214b1391872015b69965ba3f#8b855f6d864176a8214b1391872015b69965ba3f"
 dependencies = [
  "base64",
  "hex",

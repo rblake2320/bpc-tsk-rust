@@ -10,20 +10,24 @@ description = "BPC-first, TSK-second authorization composition core"
 
 [features]
 default = []
-axum-adapter = ["dep:axum"]
+axum-adapter = ["dep:axum", "dep:tokio"]
 postgres-authority = ["dep:postgres", "dep:rustls", "dep:tokio-postgres-rustls"]
 
 [dependencies]
-bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "061c53efa294ba9e3a2df4bdfb6f5f6815946cbe", version = "=0.1.0", default-features = false }
-tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "0250e92548f2e55336a9f3720af446bf4d77f896", version = "=0.1.0" }
+bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "3d795806ca68dea9181a60a253029967584ea3e7", version = "=0.1.0", default-features = false }
+tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "8b855f6d864176a8214b1391872015b69965ba3f", version = "=0.1.0" }
 hmac.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 postgres = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 tokio-postgres-rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [[test]]
 name = "postgres_authority"

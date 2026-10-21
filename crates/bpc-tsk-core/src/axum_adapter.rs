@@ -14,6 +14,8 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use thiserror::Error;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{
@@ -28,15 +30,39 @@ const RESERVED_TSK_RESPONSE_HEADERS: [&str; 4] = [
     "x-tsk-hotp-counters-remaining",
 ];
 
+/// Default maximum number of concurrent blocking verification tasks per router state.
+pub const DEFAULT_BLOCKING_ADMISSION_CAPACITY: usize = 64;
+
+/// Largest accepted blocking verification capacity per router state.
+pub const MAX_BLOCKING_ADMISSION_CAPACITY: usize = 1_024;
+
+/// Rejection returned when blocking-admission configuration is unsafe.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingAdmissionConfigError {
+    /// The requested capacity is zero or exceeds the bounded maximum.
+    #[error("blocking admission capacity must be within the documented nonzero maximum")]
+    InvalidCapacity,
+}
+
 /// Shared state for [`bpc_tsk_admission`].
 ///
 /// The verifier remains immutable for the lifetime of the Axum router. Its
 /// authority dependencies, including BPC replay state and TSK state, must be
 /// independently durable before this is used outside controlled testing.
-#[derive(Clone)]
 pub struct BridgeAxumState<B, S, T, A> {
     verifier: Arc<CombinedVerifier<B, S, T, A>>,
     limits: RequestLimits,
+    admission_permits: Arc<Semaphore>,
+}
+
+impl<B, S, T, A> Clone for BridgeAxumState<B, S, T, A> {
+    fn clone(&self) -> Self {
+        Self {
+            verifier: Arc::clone(&self.verifier),
+            limits: self.limits,
+            admission_permits: Arc::clone(&self.admission_permits),
+        }
+    }
 }
 
 impl<B, S, T, A> BridgeAxumState<B, S, T, A> {
@@ -46,7 +72,31 @@ impl<B, S, T, A> BridgeAxumState<B, S, T, A> {
         Self {
             verifier: Arc::new(verifier),
             limits,
+            admission_permits: Arc::new(Semaphore::new(DEFAULT_BLOCKING_ADMISSION_CAPACITY)),
         }
+    }
+
+    /// Build protected-route state with an explicit bounded blocking-admission
+    /// capacity.
+    ///
+    /// This rejects zero and capacities larger than
+    /// [`MAX_BLOCKING_ADMISSION_CAPACITY`], so an invalid configuration cannot
+    /// create a router that might invoke the verifier.
+    pub fn try_new(
+        verifier: CombinedVerifier<B, S, T, A>,
+        limits: RequestLimits,
+        blocking_admission_capacity: usize,
+    ) -> Result<Self, BlockingAdmissionConfigError> {
+        if blocking_admission_capacity == 0
+            || blocking_admission_capacity > MAX_BLOCKING_ADMISSION_CAPACITY
+        {
+            return Err(BlockingAdmissionConfigError::InvalidCapacity);
+        }
+        Ok(Self {
+            verifier: Arc::new(verifier),
+            limits,
+            admission_permits: Arc::new(Semaphore::new(blocking_admission_capacity)),
+        })
     }
 
     /// Returns the immutable composition verifier for router construction and
@@ -106,7 +156,21 @@ where
         Err(_) => return generic_denial(),
     };
 
-    let PublicDecision::Authorized(snapshot) = state.verifier.verify(captured) else {
+    let permit = match Arc::clone(&state.admission_permits).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return generic_denial(),
+    };
+    let verifier = Arc::clone(&state.verifier);
+    let decision = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verifier.verify(captured)
+    })
+    .await
+    {
+        Ok(decision) => decision,
+        Err(_) => return generic_denial(),
+    };
+    let PublicDecision::Authorized(snapshot) = decision else {
         return generic_denial();
     };
     let authenticated_headers = match verified_tsk_response_headers(snapshot.tsk_response_headers())
@@ -171,7 +235,163 @@ fn generic_denial() -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
+    use crate::{
+        AuditContextKey, BpcGateError, BpcVerification, MemoryBindingStore, NoopAuditSink,
+        TskVerifierError,
+    };
+    use axum::{Router, middleware, routing::post};
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct CountingBpc {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BpcGate for CountingBpc {
+        fn verify(&self, _request: &ImmutableRequest) -> Result<BpcVerification, BpcGateError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(BpcGateError)
+        }
+
+        fn recheck_current(&self, _verification: &BpcVerification) -> Result<bool, BpcGateError> {
+            Err(BpcGateError)
+        }
+    }
+
+    struct UnusedTsk;
+
+    impl TskRequestVerifier for UnusedTsk {
+        fn verify(
+            &self,
+            _request: &tsk_rust_protocol::RequestData,
+        ) -> Result<tsk_rust_protocol::VerifyResult, TskVerifierError> {
+            Err(TskVerifierError)
+        }
+    }
+
+    struct PanicAudit;
+
+    impl AuditSink for PanicAudit {
+        fn record(&self, _record: crate::BridgeAuditRecord) -> Result<(), crate::AuditError> {
+            panic!("test audit panic");
+        }
+    }
+
+    fn admission_request() -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("x-bpc-pair-id", "pair_test")
+            .header("x-bpc-signature", "signature")
+            .header("x-bpc-signed-data", "payload")
+            .header("x-bpc-version", "1.0")
+            .header("x-tsk-client-id", "tsk_client")
+            .header("x-tsk-key", "key")
+            .header("x-tsk-version", "1")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn denied_status(response: &Response) {
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+
+    #[test]
+    fn explicit_blocking_capacity_rejects_zero_and_excessive_values() {
+        let make_verifier = || {
+            CombinedVerifier::new(
+                CountingBpc::default(),
+                MemoryBindingStore::default(),
+                UnusedTsk,
+                NoopAuditSink,
+                AuditContextKey::new([1_u8; 32]),
+            )
+        };
+        assert!(matches!(
+            BridgeAxumState::try_new(make_verifier(), RequestLimits::default(), 0),
+            Err(BlockingAdmissionConfigError::InvalidCapacity)
+        ));
+        assert!(matches!(
+            BridgeAxumState::try_new(
+                make_verifier(),
+                RequestLimits::default(),
+                MAX_BLOCKING_ADMISSION_CAPACITY + 1,
+            ),
+            Err(BlockingAdmissionConfigError::InvalidCapacity)
+        ));
+    }
+
+    #[test]
+    fn saturated_blocking_admission_returns_generic_denial_without_verifier_call() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let bpc = CountingBpc::default();
+            let calls = Arc::clone(&bpc.calls);
+            let state = BridgeAxumState::try_new(
+                CombinedVerifier::new(
+                    bpc,
+                    MemoryBindingStore::default(),
+                    UnusedTsk,
+                    NoopAuditSink,
+                    AuditContextKey::new([2_u8; 32]),
+                ),
+                RequestLimits::default(),
+                1,
+            )
+            .unwrap();
+            let permit = Arc::clone(&state.admission_permits)
+                .try_acquire_owned()
+                .unwrap();
+            let app = Router::new()
+                .route("/", post(|| async { StatusCode::NO_CONTENT }))
+                .layer(middleware::from_fn_with_state(state, bpc_tsk_admission));
+
+            let response = app.oneshot(admission_request()).await.unwrap();
+            denied_status(&response);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "a saturated admission slot must not invoke the composition verifier",
+            );
+            drop(permit);
+        });
+    }
+
+    #[test]
+    fn blocking_task_panic_returns_generic_denial() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = BridgeAxumState::new(
+                CombinedVerifier::new(
+                    CountingBpc::default(),
+                    MemoryBindingStore::default(),
+                    UnusedTsk,
+                    PanicAudit,
+                    AuditContextKey::new([3_u8; 32]),
+                ),
+                RequestLimits::default(),
+            );
+            let app = Router::new()
+                .route("/", post(|| async { StatusCode::NO_CONTENT }))
+                .layer(middleware::from_fn_with_state(state, bpc_tsk_admission));
+
+            let response = app.oneshot(admission_request()).await.unwrap();
+            denied_status(&response);
+        });
+    }
 
     #[test]
     fn preserves_duplicate_header_values_for_composition_preflight() {

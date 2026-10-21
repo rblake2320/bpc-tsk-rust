@@ -16,6 +16,7 @@ sha2 = "0.10.9"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["v4"] }
 axum = { version = "0.8.8", default-features = false }
+tokio = { version = "1.48.0", default-features = false }
 postgres = { version = "0.19.14", features = ["with-uuid-1"] }
 rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-postgres-rustls = { version = "0.13.0", default-features = false }
