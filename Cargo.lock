@@ -81,7 +81,7 @@ dependencies = [
 [[package]]
 name = "bpc-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rblake2320/bpc-rust-protocol?rev=7173a5a13ce0fe962c02d957fcfde126c90e25cd#7173a5a13ce0fe962c02d957fcfde126c90e25cd"
+source = "git+https://github.com/rblake2320/bpc-rust-protocol?rev=a8000c95aab1c33bdbfb2151bc70278a7cf668c5#a8000c95aab1c33bdbfb2151bc70278a7cf668c5"
 dependencies = [
  "base64",
  "hkdf",
