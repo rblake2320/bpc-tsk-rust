@@ -36,3 +36,7 @@ cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 Normal tests require no live services. The ignored PostgreSQL tests require explicitly set test URL variables; commands and disposable-database caveats are in the operator guide.
 
 The composition strengthens independent authorization and replay resistance. It is not “ultra encryption.” Transport confidentiality requires TLS 1.3, and storage confidentiality requires a separately reviewed standard AEAD/KMS key-management design.
+
+## Runnable private-edge production candidate
+
+[`bpc-tsk-service`](crates/bpc-tsk-service/README.md) constructs independent TLS-backed BPC PostgreSQL, governed Redis, TSK PostgreSQL and bridge PostgreSQL authorities, explicitly reconciles Redis and checks the bridge schema before exposing its private listener. It accepts only `bpc-tsk-service --config /absolute/path`, uses bounded private secret files, serves `/livez`, `/readyz` and the snapshot-only `/v1/protected` route, and supplies a hardened systemd template. It never migrates, exports TSK maps/shared secrets, retries factors, or uses insecure constructors. This candidate does not remove the separate production/HA/security-review gates above.

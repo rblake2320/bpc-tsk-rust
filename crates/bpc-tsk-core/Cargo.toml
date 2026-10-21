@@ -14,7 +14,7 @@ axum-adapter = ["dep:axum", "dep:tokio"]
 postgres-authority = ["dep:postgres", "dep:rustls", "dep:tokio-postgres-rustls"]
 
 [dependencies]
-bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "3d795806ca68dea9181a60a253029967584ea3e7", version = "=0.1.0", default-features = false }
+bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "f67d00db46a49e8babcaa074fa56ad7adbc1e2ec", version = "=0.1.0", default-features = false }
 tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "8b855f6d864176a8214b1391872015b69965ba3f", version = "=0.1.0" }
 hmac.workspace = true
 sha2.workspace = true

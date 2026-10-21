@@ -116,9 +116,10 @@ impl<B, S, T, A> BridgeAxumState<B, S, T, A> {
 /// the handler response and replaced with the verified snapshot's values, so
 /// they are emitted no more than once.
 ///
-/// All rejected requests receive the same empty `401` response with
+/// Factor/input denials receive the same empty `401` response with
 /// `Cache-Control: no-store`, regardless of which factor or edge validation
-/// failed. Rate limiting, TLS termination, request-smuggling defenses, and
+/// failed. Blocking-capacity overload returns empty `503` with `Retry-After: 1`
+/// before any factor work. Rate limiting, TLS termination, smuggling defenses, and
 /// reverse-proxy header trust must be enforced by the surrounding deployment.
 pub async fn bpc_tsk_admission<B, S, T, A>(
     State(state): State<BridgeAxumState<B, S, T, A>>,
@@ -158,7 +159,7 @@ where
 
     let permit = match Arc::clone(&state.admission_permits).try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => return generic_denial(),
+        Err(_) => return resource_overload(),
     };
     let verifier = Arc::clone(&state.verifier);
     let decision = match tokio::task::spawn_blocking(move || {
@@ -230,6 +231,15 @@ fn generic_denial() -> Response {
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+fn resource_overload() -> Response {
+    let mut response = generic_denial();
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static("1"));
     response
 }
 
@@ -329,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn saturated_blocking_admission_returns_generic_denial_without_verifier_call() {
+    fn saturated_blocking_admission_returns_503_without_verifier_call() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -357,7 +367,10 @@ mod tests {
                 .layer(middleware::from_fn_with_state(state, bpc_tsk_admission));
 
             let response = app.oneshot(admission_request()).await.unwrap();
-            denied_status(&response);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["retry-after"], "1");
+            assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());
             assert_eq!(
                 calls.load(Ordering::SeqCst),
                 0,

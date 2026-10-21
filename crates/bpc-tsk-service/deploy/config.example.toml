@@ -1,0 +1,43 @@
+# Install the actual config as a private regular single-link file (0400/0600).
+# Invoke only: bpc-tsk-service --config /absolute/path/to/config.toml
+# The listener must be behind a separately authenticated TLS edge.
+listener = "127.0.0.1:8080"
+max_method_bytes = 16
+max_header_count = 64
+max_header_bytes = 16384
+max_body_bytes = 1048576
+max_concurrency = 64
+blocking_admission = 16
+max_blocking_threads = 16
+worker_threads = 4
+request_timeout_ms = 10000
+drain_timeout_ms = 30000
+startup_timeout_ms = 45000
+audit_key_file = "/run/credentials/bpc-tsk-service.service/audit.key"
+
+[bpc]
+dsn_file = "/run/credentials/bpc-tsk-service.service/bpc.dsn"
+ca_file = "/run/credentials/bpc-tsk-service.service/bpc.ca.pem"
+schema = "bpc_runtime"
+
+[tsk]
+dsn_file = "/run/credentials/bpc-tsk-service.service/tsk.dsn"
+ca_file = "/run/credentials/bpc-tsk-service.service/tsk.ca.pem"
+schema = "tsk_runtime"
+
+[bridge]
+dsn_file = "/run/credentials/bpc-tsk-service.service/bridge.dsn"
+ca_file = "/run/credentials/bpc-tsk-service.service/bridge.ca.pem"
+# Bridge SQL is fully qualified; this is intentionally not arbitrary search_path.
+schema = "bpc_tsk_bridge"
+
+[redis]
+endpoint_file = "/run/credentials/bpc-tsk-service.service/redis.endpoint"
+ca_file = "/run/credentials/bpc-tsk-service.service/redis.ca.pem"
+namespace = "production-admission"
+epoch = "reviewed-epoch-1"
+signature_window_ms = 60000
+command_timeout_ms = 2000
+# Enable BOTH only when the Redis endpoint requires client mTLS.
+# client_certificate_file = "/run/credentials/bpc-tsk-service.service/redis.client.pem"
+# client_key_file = "/run/credentials/bpc-tsk-service.service/redis.client.key"

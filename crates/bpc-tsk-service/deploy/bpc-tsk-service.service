@@ -1,0 +1,79 @@
+# Template: replace binary/credential paths and exact endpoint IPs before use.
+# Create fixed non-login user/group bpc-tsk; alternatively adapt DynamicUser=yes.
+[Unit]
+Description=Private-edge BPC-first TSK admission service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bpc-tsk
+Group=bpc-tsk
+UMask=0077
+ExecStart=/opt/bpc-tsk/bin/bpc-tsk-service --config /run/credentials/bpc-tsk-service.service/config.toml
+LoadCredential=config.toml:/etc/bpc-tsk/config.toml
+LoadCredential=bpc.dsn:/etc/bpc-tsk/secrets/bpc.dsn
+LoadCredential=bpc.ca.pem:/etc/bpc-tsk/secrets/bpc.ca.pem
+LoadCredential=tsk.dsn:/etc/bpc-tsk/secrets/tsk.dsn
+LoadCredential=tsk.ca.pem:/etc/bpc-tsk/secrets/tsk.ca.pem
+LoadCredential=bridge.dsn:/etc/bpc-tsk/secrets/bridge.dsn
+LoadCredential=bridge.ca.pem:/etc/bpc-tsk/secrets/bridge.ca.pem
+LoadCredential=redis.endpoint:/etc/bpc-tsk/secrets/redis.endpoint
+LoadCredential=redis.ca.pem:/etc/bpc-tsk/secrets/redis.ca.pem
+LoadCredential=audit.key:/etc/bpc-tsk/secrets/audit.key
+# If config enables Redis mTLS, enable both:
+# LoadCredential=redis.client.pem:/etc/bpc-tsk/secrets/redis.client.pem
+# LoadCredential=redis.client.key:/etc/bpc-tsk/secrets/redis.client.key
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Service writes no persistent state; keep only a private runtime allowance.
+RuntimeDirectory=bpc-tsk
+RuntimeDirectoryMode=0700
+ReadWritePaths=/run/bpc-tsk
+IPAddressDeny=any
+IPAddressAllow=localhost
+# Replace these documentation placeholders with exact database/Redis IPs.
+IPAddressAllow=10.20.0.11/32
+IPAddressAllow=10.20.0.12/32
+IPAddressAllow=10.20.0.13/32
+IPAddressAllow=10.20.0.14/32
+# For remote private TLS edge, allow only its exact IP too.
+# DNS must use loopback resolver or add exact resolver IP. No general egress.
+SocketBindDeny=any
+SocketBindAllow=ipv4:tcp:8080
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStartSec=45
+# Must exceed config drain_timeout_ms plus transport write allowance.
+TimeoutStopSec=35
+SendSIGKILL=yes
+Restart=no
+LimitCORE=0
+LimitNOFILE=1024
+TasksMax=1152
+MemoryMax=512M
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

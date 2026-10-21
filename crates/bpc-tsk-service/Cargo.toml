@@ -1,0 +1,37 @@
+[package]
+name = "bpc-tsk-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Private-edge production-candidate BPC-first TSK admission service"
+
+[dependencies]
+bpc-tsk-core = { path = "../bpc-tsk-core", version = "=0.1.0", features = ["axum-adapter", "postgres-authority"] }
+bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "f67d00db46a49e8babcaa074fa56ad7adbc1e2ec", version = "=0.1.0", default-features = false, features = ["postgres-store", "redis-store"] }
+tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "8b855f6d864176a8214b1391872015b69965ba3f", version = "=0.1.0", default-features = false, features = ["postgres-store"] }
+axum = { workspace = true, features = ["http1", "tokio", "matched-path"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "sync", "time", "io-util", "macros"] }
+postgres.workspace = true
+rustls.workspace = true
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.8.23"
+rustix = { version = "1.1.4", features = ["fs"] }
+percent-encoding = "2.3.2"
+hyper = { version = "1.8.1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
+http-body-util = "0.1.3"
+httparse = "1.10.1"
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+url = "2.5.8"
+zeroize = { version = "1.8.2", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+uuid.workspace = true
+futures-util = "0.3.32"
+
+[lints]
+workspace = true
