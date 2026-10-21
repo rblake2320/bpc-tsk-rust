@@ -11,15 +11,23 @@ description = "BPC-first, TSK-second authorization composition core"
 [features]
 default = []
 axum-adapter = ["dep:axum"]
+postgres-authority = ["dep:postgres", "dep:rustls", "dep:tokio-postgres-rustls"]
 
 [dependencies]
-bpc-protocol.workspace = true
-tsk-rust-protocol.workspace = true
+bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "061c53efa294ba9e3a2df4bdfb6f5f6815946cbe", version = "=0.1.0", default-features = false }
+tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "0250e92548f2e55336a9f3720af446bf4d77f896", version = "=0.1.0" }
 hmac.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 axum = { workspace = true, optional = true }
+postgres = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio-postgres-rustls = { workspace = true, optional = true }
+
+[[test]]
+name = "postgres_authority"
+required-features = ["postgres-authority"]
 
 [lints]
 workspace = true

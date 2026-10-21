@@ -4,8 +4,8 @@
 //! derives, copies, or exposes their secret material. The public result is
 //! either a generic denial with a correlation ID or an immutable authorization
 //! snapshot. It is deliberately not a production-readiness claim: durable
-//! PostgreSQL bindings, a transactional audit outbox, and the full TSK HA
-//! authority are separate required deployment gates.
+//! authority deployment/fault validation and the full TSK HA authority remain
+//! separate required deployment gates.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +13,11 @@
 /// BPC-first/TSK-second route admission. Enable with `axum-adapter`.
 #[cfg(feature = "axum-adapter")]
 pub mod axum_adapter;
+
+/// Revisioned PostgreSQL bindings and a secret-free transactional audit outbox.
+/// Enable with `postgres-authority`; deployment review remains mandatory.
+#[cfg(feature = "postgres-authority")]
+pub mod postgres_authority;
 
 use std::{
     collections::BTreeMap,

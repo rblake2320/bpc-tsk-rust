@@ -17,6 +17,22 @@ Public callers receive only a generic decision and correlation ID. Protected aud
 
 ## Status
 
-**Private checkpoint; not production-ready.** The core has unit tests for BPC-first ordering, duplicate-header rejection, identity mismatch, final fences, redacted audit digests, and its optional Axum admission adapter. The adapter captures exact request bytes, preserves duplicate headers, returns generic denial, and overwrites TSK response-control headers with the verified values. It does not yet contain the required PostgreSQL binding/outbox implementation, real PostgreSQL/Redis service drills, TSK durable authority/HA parity, or independent security review. See [the readiness gate](docs/PRODUCTION_READINESS.md), [architecture](docs/ARCHITECTURE.md), and [cryptographic assurance assessment](docs/CRYPTOGRAPHIC_ASSURANCE.md).
+**Private checkpoint; not production-ready.** The core has unit tests for BPC-first ordering, duplicate-header rejection, identity mismatch, final fences, redacted audit digests, and its optional Axum admission adapter. The adapter captures exact request bytes, preserves duplicate headers, returns generic denial, and overwrites TSK response-control headers with the verified values. The optional `postgres-authority` module now supplies revisioned bindings, append-only lifecycle history, explicit checksummed migrations, and a transactional audit outbox with fenced publisher leases. Local integration tests are opt-in; production PostgreSQL/Redis fault/HA drills, TSK durable authority/HA parity, deployment validation, external audit anchoring, and independent security review remain release gates. See [the readiness gate](docs/PRODUCTION_READINESS.md), [architecture](docs/ARCHITECTURE.md), and [cryptographic assurance assessment](docs/CRYPTOGRAPHIC_ASSURANCE.md).
+
+## Durable bridge authority
+
+Enable `postgres-authority` to use `postgres_authority::PostgresAuthority` as both `BindingStore` and `AuditSink`. Production connections must use **`connect_tls`**, which requires explicit DER trust roots, verifies the certificate chain and configured hostname/IP SAN, and permits only TLS 1.3 with no plaintext fallback. **`connect_insecure_local_test`** is explicitly insecure and rejects non-loopback test endpoints. Neither constructor implicitly applies migrations or creates roles.
+
+The trusted control plane uses expected-revision `activate`/`revoke` calls with a stable operation UUID, bounded actor identity and closed reason code. Mutations use serializable transactions; stale revisions deny, revoked bindings retain tombstones, and history plus outbox intent commits with the new revision. An active TSK client cannot be mapped to two pairs/principals. A separate publisher uses `claim_outbox` and `acknowledge_delivery`; delivery is at-least-once and must deduplicate by event UUID externally. No keys, bodies, signatures, HMAC values or JWKs are persisted: the core's independent audit digest is transformed into a domain-separated SHA-256 commitment before storage.
+
+This is a **synchronous** authority. Use a bounded blocking executor and separately provisioned migrator/verifier/control-plane/publisher credentials. The current Axum adapter calls the coordinator synchronously and is **not yet wired to offload durable dependencies**; do not attach this PostgreSQL implementation to its async reactor unchanged. Statement, lock, idle-transaction, TCP-connect, TCP-user and connection-contention limits are bounded; they are not a complete end-to-end cancellation or failover design. See the [migration and role contract](migrations/README.md) and [operator/API guide](docs/POSTGRES_AUTHORITY.md).
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --all-features --all-targets --locked
+cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+```
+
+Normal tests require no live services. The ignored PostgreSQL tests require explicitly set test URL variables; commands and disposable-database caveats are in the operator guide.
 
 The composition strengthens independent authorization and replay resistance. It is not “ultra encryption.” Transport confidentiality requires TLS 1.3, and storage confidentiality requires a separately reviewed standard AEAD/KMS key-management design.

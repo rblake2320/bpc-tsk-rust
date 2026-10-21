@@ -11,13 +11,14 @@ repository = "https://github.com/rblake2320/bpc-tsk-rust"
 publish = false
 
 [workspace.dependencies]
-bpc-protocol = { git = "https://github.com/rblake2320/bpc-rust-protocol", rev = "a8000c95aab1c33bdbfb2151bc70278a7cf668c5", default-features = false }
-tsk-rust-protocol = { git = "https://github.com/rblake2320/tsk-rust-protocol", rev = "2dcded8eba3a8c09a7ffdbc74e8f05b2829b34d0" }
 hmac = "0.12.1"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["v4"] }
 axum = { version = "0.8.8", default-features = false }
+postgres = { version = "0.19.14", features = ["with-uuid-1"] }
+rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-postgres-rustls = { version = "0.13.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
