@@ -63,12 +63,34 @@ An `Allowed` event is **authorization intent**, not proof of a business side eff
 
 ## Separate at-least-once publisher
 
-1. Call `claim_outbox(worker_id, batch_size, lease)`: **1–100 events**, leases **100 ms–5 min**, database-clock expiry, SERIALIZABLE transaction, `FOR UPDATE ... SKIP LOCKED`, fresh random lease token and monotonically increasing claim count. Do not publish any returned tentative data until this method has successfully committed/returned.
-2. Publish the closed `OutboxPayload` externally with its stable event UUID as the deduplication key. Handle backlog and destination failures independently of factor verification. Lifecycle payloads resolve from immutable history, never current binding rows.
-3. Call `acknowledge_delivery(event_id, worker_id, lease_token)` only after external durable acceptance. Wrong owner/token and expired/reclaimed leases cannot acknowledge; identical successful acknowledgements are idempotent. Payload/history is never updated/deleted.
-4. A crashed/uncertain publisher leaves events pending; they become reclaimable after lease expiry. There is no heartbeat API today: select an adequately bounded lease or allow reclaim/redelivery. Serialization-aborted claims/acks can be retried by publisher policy; unknown claim commits must not trigger publication of an unconfirmed lease.
+Version 2 makes delivery a **database-controlled state machine**:
 
-External deduplication is essential: acceptance followed by a lost acknowledgement causes redelivery. Publisher credentials are trusted to acknowledge their assigned queue; the role template does not enforce per-worker tenancy or verify the external destination's receipt. External anchors, retention/reconciliation, alerting, durable destination and publisher daemon are deployment work, not supplied here.
+| Current state | Authorized transition | Result |
+| --- | --- | --- |
+| Pending, due, no live lease, within budget | Publisher claim | Pending with DB-generated token/owner/expiry; lifetime and cycle claims increase |
+| Pending with matching live fence | Publisher acknowledge after acceptance | Delivered; identical successful fence remains idempotent |
+| Pending with matching live fence | Publisher record transient failure | Pending with released fence and future DB-clock retry schedule |
+| Pending | Permanent failure, exhausted claims or age | Quarantined; no lease or retry schedule |
+| Quarantined | Privileged, audited control-plane requeue | Pending with new bounded cycle and at least 1 s delay |
+| Delivered | None | Terminal; no requeue or further failure mutation |
+
+1. Call `claim_outbox(worker_id, batch_size, lease)`: **1–100 events**, leases **100 ms–5 min**, database-clock expiry, SERIALIZABLE transaction, `FOR UPDATE ... SKIP LOCKED`, fresh **DB-generated random token per event** and monotonically increasing lifetime claim count. The returned `ClaimedAuditEvent` API is unchanged; tokens are no longer shared by a batch. Claim checks `state`, `next_attempt_at`, lease expiry, and cycle budgets. A batch can quarantine expired work instead of returning claims, so an empty batch is not proof that the entire queue is drained. Do not publish any returned tentative data until this method has successfully committed/returned.
+2. Publish the closed `OutboxPayload` externally with its stable event UUID as the deduplication key. Handle backlog and destination failures independently of factor verification. Lifecycle payloads resolve from immutable history, never current binding rows.
+3. Call `acknowledge_delivery(event_id, worker_id, lease_token)` only after external durable acceptance. Wrong owner/token, expired/reclaimed/released fences and quarantined events cannot acknowledge; identical successful acknowledgements are idempotent. DB time is evaluated **after acquiring the row lock**, so lock wait cannot preserve an expired fence. Payload/history is never updated/deleted.
+4. On destination failure call `record_delivery_failure(event_id, worker_id, lease_token, DeliveryFailureClass, retry_after)`. The result is `Some(Pending)` or `Some(Quarantined)`; `None` means the fence/state did not authorize a mutation. A failure releases the token and owner, so repeat/stale failures cannot reschedule anything. No destination message, URL, payload or credential is accepted. Caller delay must be **1 s–1 h**. The DB uses the greater of that delay and exponential backoff **1, 2, 4, …, 256, 300 s (capped)**. A requested retry crossing the age deadline quarantines instead.
+5. A crashed/uncertain publisher leaves events pending, but claim sets `next_attempt_at` to **lease expiry plus the same exponential backoff**. Expiry alone never causes an immediate tight reclaim loop. There is no heartbeat API: select an adequately bounded lease or allow delayed reclaim/redelivery. Serialization-aborted transactions can be retried by a bounded publisher policy; unknown claim commits must not trigger publication of an unconfirmed lease. Unknown failure/ack outcomes do not authorize publishing again; deduplication and later fenced recovery reconcile them.
+
+Closed delivery classes are **Unavailable, Timeout, RateLimited** (retryable within budget), and **Rejected, InvalidEvent** (immediate quarantine). They are distinct from the bridge's verification `FailureClass`. Failure metadata stores only the corresponding fixed code and a DB timestamp.
+
+Budgets are fixed in checksummed SQL, not adjustable by publisher inputs: **12 claims and 7 days per cycle**, counting downtime and abandoned claims. Age starts at the immutable event's `recorded_at`; an audited requeue starts a new cycle at DB time. A claim sweep quarantines due/aged, non-live work in bounded batches. The twelfth claim can still acknowledge a live accepted delivery; a failure or abandoned-expiry sweep quarantines it rather than issuing a thirteenth claim. A live claim may acknowledge after the age boundary while its lease is valid; age bounds **new claims and retries**, not cancellation of already accepted external work. Lifetime attempts never reset or overflow: `i64::MAX` work is quarantined and cannot requeue.
+
+### Controlled database privileges and recovery
+
+The publisher has no INSERT/UPDATE/DELETE/TRUNCATE delivery rights, including **legacy column UPDATE grants**. Only three fixed-search-path `SECURITY DEFINER` entry points are executable by `bridge_publisher`: `claim_audit_deliveries`, `acknowledge_audit_delivery`, and `fail_audit_delivery`. Helpers, triggers and privileged recovery are not exposed; PUBLIC execute is revoked. Initial creation also runs through a controlled enqueue trigger rather than runtime delivery-row INSERT rights. Functions must be owned by the separate trusted DDL owner, with no runtime ownership, schema CREATE, broad function/default grants or dangerous inherited memberships. The [role template](../migrations/ROLE_GRANTS.example.sql) must be reviewed for deployment-specific roles.
+
+Only the control-plane role can call `requeue_delivery(event_id, &DeliveryRequeueContext)`, wrapping `requeue_audit_delivery`. It works **only for quarantine** and atomically appends an immutable `delivery_requeues` record (operation UUID, operator label, closed DestinationRepaired/ReviewedRecovery reason, DB session actor, prior claims/cycle/age/cause, DB time). An identical operation UUID reconciles unknown commits without a new cycle/audit record; changed event, actor or reason conflicts. A historical true result does not imply the event is currently pending. Fresh operations cannot requeue delivered or live pending work. Requeue resets cycle attempts/age but preserves lifetime attempts, stable event identity, payload and prior failure metadata; old fences stay invalid. Operator authorization comes from isolated credentials and reviewed policy, **not the actor label**. The requeue history is a local audit ledger; independently anchoring/exporting it remains deployment work.
+
+External deduplication is essential: acceptance followed by a lost acknowledgement causes redelivery. Publisher credentials are still trusted to acknowledge leases they can observe; worker labels/token fences are **not per-worker tenancy or proof of an external receipt**. Run workers with bounded, delayed empty-poll/error retries and alert on backlog, oldest pending age, attempts and quarantine. Retention/reconciliation, external anchors, alerting, durable destination and publisher daemon remain deployment work.
 
 ## Tests
 
@@ -80,7 +102,7 @@ cargo test --workspace --all-features --all-targets --locked
 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 ```
 
-The live suite is ignored by default **and requires explicit URL variables**, never defaults or ambient `PG*` credentials. Use a private, disposable PostgreSQL 16+ database owned solely by the test suite. It applies persistent schema/history, exercises rejection triggers, and claims/acknowledges that database's publisher queue; never point it at production/shared data. Run live tests sequentially.
+The live suite is ignored by default **and requires explicit URL variables**, never defaults or ambient `PG*` credentials. Use a private, disposable PostgreSQL 16+ database owned solely by the test suite. It applies persistent schema/history, exercises rejection triggers, and claims/acknowledges that database's publisher queue; never point it at production/shared data. Run live tests sequentially. The controlled retry test accelerates schedules with owner-only SQL to test long exponential delays without sleeping for minutes; runtime privilege tests separately prove that publishers cannot do this.
 
 `binding_lock_timeout_is_fail_closed_and_transactional` uses the same explicit local URL to exercise rollback under a held table lock. `least_privilege_role_template_separates_runtime_boundaries` additionally requires role-administration privileges on a **disposable cluster without the example role names already present**; it creates, exercises and removes those example roles. These tests are also ignored unless explicitly selected.
 
@@ -103,4 +125,15 @@ BPC_TSK_POSTGRES_TLS_WRONG_HOST_TEST_URL='host=wrong.test hostaddr=127.0.0.1 por
   verified_tls_connection_and_explicit_hostname_failure -- --ignored --test-threads=1
 ```
 
-Unit tests cover limits, canonical identifiers/revision overflow, explicit insecure API locality/localhost pinning, empty/malformed trust roots, fixed secret-free audit commitments, closed event shapes/codes, idempotency metadata matching, claim bounds, schema invariants and trait compatibility. Opt-in live tests cover migration reapplication/unknown-version refusal, active-client uniqueness, activate/revoke/reactivate fences, transactional rejection/lock-timeout rollback, append-only enforcement, audit phase idempotency/conflicts, lease expiry/reclaim/old-token rejection, acknowledgement idempotency, concurrent revision mutations, local runtime-role grants and verified TLS hostname failure. These are **local integration checks**, not partition/failover/crash/ambiguous-commit or production least-privilege/HA evidence.
+`controlled_retry_quarantine_requeue_and_no_tight_loop` uses `BPC_TSK_POSTGRES_TEST_URL` to test retry schedules, failure fence rejection, permanent/attempt/age quarantine, exponential delay, abandoned final claims, immutable requeue audits and terminal delivery. The role test checks direct publisher SQL denials, malformed procedure inputs, PUBLIC execute revocation, temporary-search-path shadowing and control-only recovery. `version_one_upgrade_checksums_legacy_state_and_privilege_revocation` requires a **separate empty DB** via `BPC_TSK_POSTGRES_UPGRADE_TEST_URL` and role-administration privileges. It tests v1 checksum tamper refusal before DDL, legacy state preservation/quarantine, two-entry checksums, idempotent reapplication, and removal of legacy column/broad/default function grants. It deliberately repairs corrupt test metadata using owner privileges; never perform that operation on production metadata.
+
+```sh
+BPC_TSK_POSTGRES_TEST_URL='host=127.0.0.1 port=55432 user=test_owner dbname=disposable' \
+  cargo test --locked -p bpc-tsk-core --all-features --test postgres_authority \
+  controlled_retry_quarantine_requeue_and_no_tight_loop -- --ignored --test-threads=1
+BPC_TSK_POSTGRES_UPGRADE_TEST_URL='host=127.0.0.1 port=55432 user=test_owner dbname=empty_upgrade' \
+  cargo test --locked -p bpc-tsk-core --all-features --test postgres_authority \
+  version_one_upgrade_checksums_legacy_state_and_privilege_revocation -- --ignored --test-threads=1
+```
+
+Unit and ignored-live tests are **local integration checks**, not partition/failover/crash/ambiguous-commit or production least-privilege/HA evidence. Existing connection, audit, binding-fence and TLS tests remain in place.

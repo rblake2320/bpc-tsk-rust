@@ -37,11 +37,21 @@ use crate::{
 
 const BOOTSTRAP: &str = include_str!("../../../migrations/0000_bootstrap.sql");
 const MIGRATION_V1: &str = include_str!("../../../migrations/0001_authority.sql");
+const MIGRATION_V2: &str = include_str!("../../../migrations/0002_delivery_state.sql");
+const MIGRATIONS: &[&str] = &[MIGRATION_V1, MIGRATION_V2];
 /// Schema version understood by this authority. Unknown/newer versions fail closed.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 const MIGRATION_LOCK: i64 = 0x4250_4354_534b_0001;
 const MAX_BATCH: u32 = 100;
 const MAX_LEASE: Duration = Duration::from_secs(300);
+/// Fixed database-enforced maximum claims in one reviewed delivery cycle.
+pub const DELIVERY_MAX_ATTEMPTS: u32 = 12;
+/// Fixed database-enforced age budget per delivery cycle, including downtime.
+pub const DELIVERY_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Minimum requested retry delay. DB exponential backoff may increase it.
+pub const DELIVERY_MIN_RETRY: Duration = Duration::from_secs(1);
+/// Maximum requested retry delay; callers cannot postpone indefinitely.
+pub const DELIVERY_MAX_RETRY: Duration = Duration::from_secs(60 * 60);
 const AUDIT_COMMITMENT_DOMAIN: &[u8] = b"bpc-tsk-persisted-audit-commitment-v1\0";
 
 /// Bounded database and local connection-contention limits; zero is forbidden.
@@ -220,6 +230,95 @@ pub enum OutboxPayload {
     Binding(BindingChange),
 }
 
+/// Closed database delivery states. Quarantine requires privileged review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryState {
+    /// Awaiting its DB-clock schedule or held by a fenced lease.
+    Pending,
+    /// Durably accepted externally and acknowledged with a valid fence.
+    Delivered,
+    /// Retry/age budget exhausted, or permanent destination failure.
+    Quarantined,
+}
+
+impl DeliveryState {
+    fn parse(value: &str) -> Result<Self, AuthorityError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "delivered" => Ok(Self::Delivered),
+            "quarantined" => Ok(Self::Quarantined),
+            _ => Err(AuthorityError::Unavailable),
+        }
+    }
+}
+
+/// Closed, secret-free publisher failures, separate from verification failures.
+/// Never pass destination messages, URLs, request bodies or credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryFailureClass {
+    /// Transient destination/network unavailability; retry within budget.
+    Unavailable,
+    /// Transient deadline expiry, possibly after acceptance; deduplicate retries.
+    Timeout,
+    /// Destination throttling; bounded retry-after can extend DB backoff.
+    RateLimited,
+    /// Permanent destination rejection; quarantine immediately.
+    Rejected,
+    /// Invalid closed event representation; quarantine immediately.
+    InvalidEvent,
+}
+
+impl DeliveryFailureClass {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Timeout => "timeout",
+            Self::RateLimited => "rate_limited",
+            Self::Rejected => "rejected",
+            Self::InvalidEvent => "invalid_event",
+        }
+    }
+}
+
+/// Closed privileged requeue reasons; not a free-form diagnostic field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryRequeueReason {
+    /// An authorized operator repaired the external destination.
+    DestinationRepaired,
+    /// An authorized operator reviewed and approved recovery/redelivery.
+    ReviewedRecovery,
+}
+
+impl DeliveryRequeueReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::DestinationRepaired => "destination_repaired",
+            Self::ReviewedRecovery => "reviewed_recovery",
+        }
+    }
+}
+
+/// Trusted requeue metadata. Authentication/authorization comes from the
+/// separate control-plane DB role, not these caller-supplied identifiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryRequeueContext {
+    /// Non-nil stable operation ID, reused only for identical inputs.
+    pub operation_id: Uuid,
+    /// Bounded, secret-free authorized operator identifier.
+    pub actor_id: String,
+    /// Closed reason for approving a new bounded delivery cycle.
+    pub reason: DeliveryRequeueReason,
+}
+
+impl DeliveryRequeueContext {
+    fn validate(&self) -> Result<(), AuthorityError> {
+        if self.operation_id.is_nil() || !valid_identifier(&self.actor_id) {
+            return Err(AuthorityError::InvalidInput);
+        }
+        Ok(())
+    }
+}
+
 /// An event claimed for a separate at-least-once publisher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedAuditEvent {
@@ -377,27 +476,18 @@ impl PostgresAuthority {
             )
             .map_err(database_error)?;
         let version: i32 = get(&row, "version")?;
-        if version == 0 {
-            let count: i64 = get(
-                &tx.query_one(
-                    "SELECT count(*) AS count FROM bpc_tsk_bridge.schema_migrations",
-                    &[],
-                )
-                .map_err(database_error)?,
-                "count",
-            )?;
-            if count != 0 {
-                return Err(AuthorityError::SchemaMismatch);
-            }
-            tx.batch_execute(MIGRATION_V1).map_err(database_error)?;
+        verify_migration_history(&mut tx, version)?;
+        for next_version in (version + 1)..=SCHEMA_VERSION {
+            let migration = MIGRATIONS[(next_version - 1) as usize];
+            tx.batch_execute(migration).map_err(database_error)?;
             tx.execute(
                 "INSERT INTO bpc_tsk_bridge.schema_migrations (version, checksum) VALUES ($1, $2)",
-                &[&SCHEMA_VERSION, &migration_checksum()],
+                &[&next_version, &migration_checksum(migration)],
             )
             .map_err(database_error)?;
             tx.execute(
-                "UPDATE bpc_tsk_bridge.schema_version SET version = $1 WHERE singleton AND version = 0",
-                &[&SCHEMA_VERSION],
+                "UPDATE bpc_tsk_bridge.schema_version SET version = $1 WHERE singleton AND version = $2",
+                &[&next_version, &(next_version - 1)],
             ).map_err(database_error)?;
         }
         verify_schema(&mut tx)?;
@@ -625,9 +715,10 @@ impl PostgresAuthority {
         })
     }
 
-    /// Claim at most 100 pending/expired events using SKIP LOCKED and the database
-    /// clock. A fresh UUID lease token fences every claim batch. Unacknowledged
-    /// events become claimable again after expiry; there is no implicit publish.
+    /// Claim at most 100 due pending events through a controlled DB procedure.
+    /// DB-generated UUID tokens fence claims. The DB enforces schedule, lease,
+    /// age/attempt budgets and exponential delay after abandoned claims.
+    /// Quarantined/delivered events cannot be claimed; there is no implicit publish.
     /// A serialization error is an aborted claim, not permission to publish.
     pub fn claim_outbox(
         &self,
@@ -638,29 +729,27 @@ impl PostgresAuthority {
         validate_claim(worker_id, batch_size, lease)?;
         let batch_size = i64::from(batch_size);
         let lease_ms = lease.as_millis() as i64;
-        let lease_token = Uuid::new_v4();
         self.transaction(false, |tx| {
-            let rows = tx.query(
-                "WITH candidates AS (
-                    SELECT d.event_id FROM bpc_tsk_bridge.audit_deliveries d
-                    JOIN bpc_tsk_bridge.audit_outbox o USING (event_id)
-                    WHERE d.delivered_at IS NULL AND (d.lease_until IS NULL OR d.lease_until <= clock_timestamp())
-                    ORDER BY o.recorded_at, d.event_id FOR UPDATE OF d SKIP LOCKED LIMIT $1
-                 ) UPDATE bpc_tsk_bridge.audit_deliveries d
-                 SET lease_token = $2, lease_owner = $3,
-                    lease_until = clock_timestamp() + ($4::bigint * interval '1 millisecond'), attempts = d.attempts + 1
-                 FROM candidates c WHERE d.event_id = c.event_id
-                 RETURNING d.event_id, d.attempts, floor(extract(epoch FROM d.lease_until) * 1000)::bigint AS expiry_ms",
-                &[&batch_size, &lease_token, &worker_id, &lease_ms],
-            ).map_err(database_error)?;
+            let rows = tx
+                .query(
+                    "SELECT event_id, lease_token, attempts, expiry_ms
+                 FROM bpc_tsk_bridge.claim_audit_deliveries($1, $2, $3)",
+                    &[&worker_id, &batch_size, &lease_ms],
+                )
+                .map_err(database_error)?;
             let mut claimed = Vec::with_capacity(rows.len());
             for row in rows {
                 let event_id = get(&row, "event_id")?;
                 let attempts: i64 = get(&row, "attempts")?;
                 let payload = outbox_payload(tx, event_id)?;
-                claimed.push(ClaimedAuditEvent { event_id, lease_token,
+                claimed.push(ClaimedAuditEvent {
+                    event_id,
+                    lease_token: get(&row, "lease_token")?,
                     lease_expires_at_unix_ms: get(&row, "expiry_ms")?,
-                    delivery_attempt: u64::try_from(attempts).map_err(|_| AuthorityError::Unavailable)?, payload });
+                    delivery_attempt: u64::try_from(attempts)
+                        .map_err(|_| AuthorityError::Unavailable)?,
+                    payload,
+                });
             }
             Ok(claimed)
         })
@@ -676,20 +765,82 @@ impl PostgresAuthority {
         worker_id: &str,
         lease_token: Uuid,
     ) -> Result<bool, AuthorityError> {
-        if event_id.is_nil() || lease_token.is_nil() || !valid_identifier(worker_id) {
-            return Err(AuthorityError::InvalidInput);
-        }
+        validate_delivery_fence(event_id, worker_id, lease_token)?;
         self.transaction(false, |tx| {
-            let rows = tx
-                .execute(
-                    "UPDATE bpc_tsk_bridge.audit_deliveries
-                 SET delivered_at = coalesce(delivered_at, clock_timestamp()), lease_until = NULL
-                 WHERE event_id = $1 AND lease_owner = $2 AND lease_token = $3
-                    AND (delivered_at IS NOT NULL OR lease_until > clock_timestamp())",
+            let row = tx
+                .query_one(
+                    "SELECT bpc_tsk_bridge.acknowledge_audit_delivery($1, $2, $3) AS accepted",
                     &[&event_id, &worker_id, &lease_token],
                 )
                 .map_err(database_error)?;
-            Ok(rows == 1)
+            get(&row, "accepted")
+        })
+    }
+
+    /// Record a closed publisher failure and release the current live fence.
+    /// The DB schedules a retry at max(requested delay, exponential backoff),
+    /// or quarantines permanent/budget-exhausted work. Retry delay is 1 s–1 h.
+    /// Returns None for wrong owner/token, expired lease, or non-pending state.
+    /// Lost responses are not permission to retry publication; released fences
+    /// cannot mutate state again. No raw destination diagnostic is stored.
+    pub fn record_delivery_failure(
+        &self,
+        event_id: Uuid,
+        worker_id: &str,
+        lease_token: Uuid,
+        failure: DeliveryFailureClass,
+        retry_after: Duration,
+    ) -> Result<Option<DeliveryState>, AuthorityError> {
+        validate_delivery_fence(event_id, worker_id, lease_token)?;
+        validate_retry(retry_after)?;
+        let retry_ms = retry_after.as_millis() as i64;
+        self.transaction(false, |tx| {
+            let row = tx
+                .query_one(
+                    "SELECT bpc_tsk_bridge.fail_audit_delivery($1, $2, $3, $4, $5) AS state",
+                    &[
+                        &event_id,
+                        &worker_id,
+                        &lease_token,
+                        &failure.code(),
+                        &retry_ms,
+                    ],
+                )
+                .map_err(database_error)?;
+            get::<Option<&str>>(&row, "state")?
+                .map(DeliveryState::parse)
+                .transpose()
+        })
+    }
+
+    /// Privileged, atomically audited recovery of quarantined work ONLY.
+    /// Requires the separate control-plane role; publishers cannot execute it.
+    /// Resets the 12-claim/7-day cycle, not lifetime attempts or event identity;
+    /// new work is delayed at least 1 s and old lease fences remain invalid.
+    /// Identical operation IDs reconcile unknown commits; changed inputs conflict.
+    /// Returns false for non-quarantined/missing work or exhausted lifetime count.
+    pub fn requeue_delivery(
+        &self,
+        event_id: Uuid,
+        context: &DeliveryRequeueContext,
+    ) -> Result<bool, AuthorityError> {
+        if event_id.is_nil() {
+            return Err(AuthorityError::InvalidInput);
+        }
+        context.validate()?;
+        self.transaction(false, |tx| {
+            let row = tx
+                .query_one(
+                    "SELECT bpc_tsk_bridge.requeue_audit_delivery($1, $2, $3, $4) AS accepted",
+                    &[
+                        &event_id,
+                        &context.operation_id,
+                        &context.actor_id,
+                        &context.reason.code(),
+                    ],
+                )
+                .map_err(database_error)?;
+            get(&row, "accepted")
         })
     }
 
@@ -834,8 +985,8 @@ fn set_transaction_limits(
     Ok(())
 }
 
-fn migration_checksum() -> Vec<u8> {
-    Sha256::digest(MIGRATION_V1.as_bytes()).to_vec()
+fn migration_checksum(migration: &str) -> Vec<u8> {
+    Sha256::digest(migration.as_bytes()).to_vec()
 }
 
 fn verify_schema(tx: &mut Transaction<'_>) -> Result<(), AuthorityError> {
@@ -850,19 +1001,30 @@ fn verify_schema(tx: &mut Transaction<'_>) -> Result<(), AuthorityError> {
     if version != SCHEMA_VERSION {
         return Err(AuthorityError::SchemaMismatch);
     }
+    verify_migration_history(tx, version)
+}
+
+fn verify_migration_history(tx: &mut Transaction<'_>, version: i32) -> Result<(), AuthorityError> {
+    if !(0..=SCHEMA_VERSION).contains(&version) {
+        return Err(AuthorityError::SchemaMismatch);
+    }
     let rows = tx
         .query(
             "SELECT version, checksum FROM bpc_tsk_bridge.schema_migrations ORDER BY version",
             &[],
         )
         .map_err(database_error)?;
-    if rows.len() != 1 {
+    if rows.len() != version as usize {
         return Err(AuthorityError::SchemaMismatch);
     }
-    let recorded_version: i32 = get(&rows[0], "version")?;
-    let checksum: Vec<u8> = get(&rows[0], "checksum")?;
-    if recorded_version != SCHEMA_VERSION || checksum != migration_checksum() {
-        return Err(AuthorityError::SchemaMismatch);
+    for (index, row) in rows.iter().enumerate() {
+        let recorded_version: i32 = get(row, "version")?;
+        let checksum: Vec<u8> = get(row, "checksum")?;
+        if recorded_version != (index + 1) as i32
+            || checksum != migration_checksum(MIGRATIONS[index])
+        {
+            return Err(AuthorityError::SchemaMismatch);
+        }
     }
     Ok(())
 }
@@ -904,6 +1066,20 @@ fn validate_claim(worker: &str, batch: u32, lease: Duration) -> Result<(), Autho
         || lease < Duration::from_millis(100)
         || lease > MAX_LEASE
     {
+        return Err(AuthorityError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn validate_delivery_fence(event: Uuid, worker: &str, token: Uuid) -> Result<(), AuthorityError> {
+    if event.is_nil() || token.is_nil() || !valid_identifier(worker) {
+        return Err(AuthorityError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn validate_retry(delay: Duration) -> Result<(), AuthorityError> {
+    if !(DELIVERY_MIN_RETRY..=DELIVERY_MAX_RETRY).contains(&delay) {
         return Err(AuthorityError::InvalidInput);
     }
     Ok(())
@@ -1140,6 +1316,10 @@ fn outbox_payload(
 
 fn database_error(error: postgres::Error) -> AuthorityError {
     match error.code() {
+        Some(code) if code.code() == "BP001" => AuthorityError::OperationConflict,
+        Some(code) if *code == postgres::error::SqlState::INVALID_PARAMETER_VALUE => {
+            AuthorityError::InvalidInput
+        }
         Some(code)
             if *code == postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
                 || *code == postgres::error::SqlState::T_R_DEADLOCK_DETECTED =>
@@ -1381,7 +1561,13 @@ mod tests {
     fn schema_has_version_fences_append_only_payloads_and_no_secret_columns() {
         assert!(BOOTSTRAP.contains("schema_version"));
         assert!(BOOTSTRAP.contains("schema_migrations"));
-        assert_eq!(migration_checksum().len(), 32);
+        assert_eq!(MIGRATIONS.len(), SCHEMA_VERSION as usize);
+        assert_eq!(migration_checksum(MIGRATION_V1).len(), 32);
+        assert_eq!(migration_checksum(MIGRATION_V2).len(), 32);
+        assert_ne!(
+            migration_checksum(MIGRATION_V1),
+            migration_checksum(MIGRATION_V2)
+        );
         for required in [
             "binding_history",
             "verification_attempts",
@@ -1405,7 +1591,94 @@ mod tests {
             "tsk_key",
         ] {
             assert!(!MIGRATION_V1.to_ascii_lowercase().contains(forbidden));
+            assert!(!MIGRATION_V2.to_ascii_lowercase().contains(forbidden));
         }
+    }
+
+    #[test]
+    fn delivery_inputs_are_closed_bounded_and_fenced() {
+        for state in ["pending", "delivered", "quarantined"] {
+            assert!(DeliveryState::parse(state).is_ok());
+        }
+        assert_eq!(
+            DeliveryState::parse("retry"),
+            Err(AuthorityError::Unavailable)
+        );
+        for delay in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            Duration::from_secs(3601),
+            Duration::MAX,
+        ] {
+            assert_eq!(validate_retry(delay), Err(AuthorityError::InvalidInput));
+        }
+        assert_eq!(validate_retry(DELIVERY_MIN_RETRY), Ok(()));
+        assert_eq!(validate_retry(DELIVERY_MAX_RETRY), Ok(()));
+        let event = Uuid::new_v4();
+        let token = Uuid::new_v4();
+        assert!(validate_delivery_fence(event, "publisher:1", token).is_ok());
+        assert!(validate_delivery_fence(Uuid::nil(), "publisher:1", token).is_err());
+        assert!(validate_delivery_fence(event, "publisher:1", Uuid::nil()).is_err());
+        assert!(validate_delivery_fence(event, "secret\n", token).is_err());
+        let mut context = DeliveryRequeueContext {
+            operation_id: event,
+            actor_id: "operator:1".into(),
+            reason: DeliveryRequeueReason::ReviewedRecovery,
+        };
+        assert!(context.validate().is_ok());
+        context.operation_id = Uuid::nil();
+        assert!(context.validate().is_err());
+        context.operation_id = event;
+        context.actor_id = "raw body {}".into();
+        assert!(context.validate().is_err());
+        for failure in [
+            DeliveryFailureClass::Unavailable,
+            DeliveryFailureClass::Timeout,
+            DeliveryFailureClass::RateLimited,
+            DeliveryFailureClass::Rejected,
+            DeliveryFailureClass::InvalidEvent,
+        ] {
+            assert!(MIGRATION_V2.contains(&format!("'{}'", failure.code())));
+        }
+        for reason in [
+            DeliveryRequeueReason::DestinationRepaired,
+            DeliveryRequeueReason::ReviewedRecovery,
+        ] {
+            assert!(MIGRATION_V2.contains(&format!("'{}'", reason.code())));
+        }
+    }
+
+    #[test]
+    fn delivery_boundary_has_db_clock_budgets_and_only_safe_publisher_grants() {
+        assert_eq!(DELIVERY_MAX_ATTEMPTS, 12);
+        assert_eq!(DELIVERY_MAX_AGE.as_secs(), 604800);
+        for required in [
+            "state IN ('pending', 'delivered', 'quarantined')",
+            "next_attempt_at",
+            "interval '7 days'",
+            "BETWEEN 0 AND 12",
+            "clock_timestamp()",
+            "FOR UPDATE SKIP LOCKED",
+            "SECURITY DEFINER SET search_path = pg_catalog, pg_temp",
+            "pg_catalog.gen_random_uuid()",
+            "delivery_backoff",
+            "immutable_delivery_requeues",
+            "session_user",
+            "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bpc_tsk_bridge FROM PUBLIC",
+        ] {
+            assert!(MIGRATION_V2.contains(required), "{required}");
+        }
+        let grants = include_str!("../../../migrations/ROLE_GRANTS.example.sql");
+        assert!(!grants.contains("GRANT UPDATE (lease_token"));
+        assert!(grants.contains("REVOKE ALL (event_id, lease_token"));
+        assert!(
+            grants.contains(
+                "fail_audit_delivery(uuid, text, uuid, text, bigint) TO bridge_publisher"
+            )
+        );
+        assert!(
+            grants.contains("requeue_audit_delivery(uuid, uuid, text, text) TO bridge_control")
+        );
     }
 
     #[test]
