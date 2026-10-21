@@ -6,7 +6,7 @@ The bridge depends on pinned releases of the standalone BPC and TSK crates. It h
 
 - `BpcGate` invokes BPC against the immutable request snapshot and exposes only `{pair_id, authorization_version, verified_at_ms, fresh_and_closed_scope}`.
 - `BindingStore` resolves a privileged control-plane mapping from BPC pair ID to `{principal_id, tsk_client_id, binding_revision}`. A client cannot create or select this mapping through request headers.
-- `TskRequestVerifier` calls `tsk_rust_protocol::verify_tsk_request` only after identity binding succeeds. It receives headers only; no TSK secret enters the bridge.
+- `TskRequestVerifier` calls the TSK verifier only after identity binding succeeds. The runnable service requires its bounded, independent pre-lookup TSK verification limiter. It receives headers only; no TSK secret enters the bridge.
 - `AuditSink` records a correlation ID and a domain-separated HMAC request-context digest. The core’s `NoopAuditSink` and `MemoryBindingStore` are explicitly development/test facilities, not production authority.
 
 ## Required flow
@@ -16,13 +16,13 @@ The bridge depends on pinned releases of the standalone BPC and TSK crates. It h
 3. The core rejects missing, empty or duplicate authentication fields and invalid TSK client-ID syntax before either verifier. This preflight does not call BPC, load a binding or touch TSK state; remaining BPC/TSK syntax validation belongs to the respective verifier.
 4. `BpcGate` verifies BPC first. BPC denial, malformed result, stale or open-scope result, exception/panic, or unavailable authority produces generic denial. No TSK store lookup occurs.
 5. `BindingStore` resolves one active mapping for the verified pair. The raw submitted `x-tsk-client-id` must byte-equal the stored mapping. Missing/revoked/revision-mismatched mappings or identity mismatch deny before TSK.
-6. The core constructs the TSK multi-value header snapshot from the immutable request and invokes TSK exactly once. TSK replay/lifecycle/authority failures are generic public denial.
+6. The core constructs the TSK multi-value header snapshot from the immutable request and invokes TSK exactly once through the mandatory service limiter. Exhausted admission denies before a TSK lookup or HOTP commit. TSK replay/lifecycle/authority failures are generic public denial.
 7. After a TSK success, the bridge rechecks BPC and binding fences. Any uncertainty denies; it does not roll back a BPC nonce or HOTP value.
 8. Only then is `CombinedAuthSnapshot` made available to a protected business handler. The adapter writes `X-TSK-Authenticated: 1` exactly once from the snapshot’s response headers.
 
 A production HTTP adapter must not use the BPC Axum middleware directly for bridge routes, because the standalone middleware intentionally exposes BPC-specific public error codes. The bridge owns generic response mapping.
 
-The optional `axum-adapter` feature supplies that bridge-owned admission middleware. It collects every raw header value, bounds body collection, captures the exact method/path-and-query/body tuple, then takes a non-waiting bounded admission permit before running the entire synchronous composition coordinator on Tokio's blocking executor. Saturation, task failure/panic, and invalid capacity configuration fail closed without calling the coordinator. It places only `CombinedAuthSnapshot` in request extensions and replaces any handler-supplied TSK response-control headers with the verified TSK values. Mount it outside decompression, URI rewrite, retry, and request-normalizing middleware. TLS termination, request-smuggling defense, connection/body timeouts, trusted-proxy configuration, WAF/DDoS controls, and rate limits remain deployment responsibilities and are release gates.
+The optional `axum-adapter` feature supplies that bridge-owned admission middleware. It collects every raw header value, bounds body collection, captures the exact method/path-and-query/body tuple, then takes a non-waiting bounded admission permit before running the entire synchronous composition coordinator on Tokio's blocking executor. Saturation, task failure/panic, and invalid capacity configuration fail closed without calling the coordinator. It places only `CombinedAuthSnapshot` in request extensions and replaces any handler-supplied TSK response-control headers with the verified TSK values. Mount it outside decompression, URI rewrite, retry, and request-normalizing middleware. The production service adds a transport-level one-request connection boundary, strict framing and request deadlines, a required TSK verification limiter, loopback/private binding and hardened systemd template. Every deployment terminates TLS and provides edge request-smuggling, WAF/DDoS and distributed source-aware rate controls in its separately authenticated private edge.
 
 ## Deployment topology
 

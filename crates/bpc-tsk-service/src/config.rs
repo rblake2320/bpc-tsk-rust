@@ -30,6 +30,7 @@ pub(crate) struct Config {
     pub max_header_bytes: usize,
     pub max_body_bytes: usize,
     pub max_concurrency: usize,
+    pub tsk_verification_per_minute: u32,
     pub blocking_admission: usize,
     pub max_blocking_threads: usize,
     pub worker_threads: usize,
@@ -256,6 +257,11 @@ impl Config {
                 "max_body_bytes",
             ),
             (self.max_concurrency as u64, 1_024, "max_concurrency"),
+            (
+                u64::from(self.tsk_verification_per_minute),
+                60_000,
+                "tsk_verification_per_minute",
+            ),
             (self.blocking_admission as u64, 1_024, "blocking_admission"),
             (
                 self.max_blocking_threads as u64,
@@ -656,6 +662,9 @@ mod tests {
             invalid!(max_concurrency, value);
             invalid!(blocking_admission, value);
             invalid!(max_blocking_threads, value);
+        }
+        for value in [0, 60_001] {
+            invalid!(tsk_verification_per_minute, value);
         }
         for value in [0, 65] {
             invalid!(worker_threads, value);

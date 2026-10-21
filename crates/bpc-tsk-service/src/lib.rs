@@ -5,7 +5,11 @@ mod config;
 mod http;
 mod transport;
 
-use std::{ffi::OsString, sync::Arc, time::Duration};
+use std::{
+    ffi::OsString,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use bpc_tsk_core::{
     AuditContextKey, CombinedVerifier, ProtocolBpcGate, ProtocolTskVerifier,
@@ -24,6 +28,14 @@ impl std::fmt::Display for ServiceError {
     }
 }
 impl std::error::Error for ServiceError {}
+
+fn unix_millis() -> Result<i64, ServiceError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ServiceError("tsk_verification_per_minute"))?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| ServiceError("tsk_verification_per_minute"))
+}
 
 fn construct(config: &Config, secrets: Secrets) -> Result<axum::Router, ServiceError> {
     let bounded_dsn = config::bounded_bpc_dsn(&secrets.bpc_dsn)?;
@@ -75,6 +87,13 @@ fn construct(config: &Config, secrets: Secrets) -> Result<axum::Router, ServiceE
         },
     )
     .map_err(|_| ServiceError("tsk.dsn_file"))?;
+    let tsk_limiter = Arc::new(
+        tsk_rust_protocol::MemoryVerificationRateLimiter::new(
+            config.tsk_verification_per_minute,
+            unix_millis()?,
+        )
+        .map_err(|_| ServiceError("tsk_verification_per_minute"))?,
+    );
     let authority = PostgresAuthority::connect_tls(
         postgres_config(&secrets.bridge_dsn, "bridge.dsn_file")?,
         &[secrets.bridge_ca_der],
@@ -95,7 +114,8 @@ fn construct(config: &Config, secrets: Secrets) -> Result<axum::Router, ServiceE
                 nonces,
             ),
             authority.clone(),
-            ProtocolTskVerifier::new(tsk, tsk_rust_protocol::TskServerConfig::default()),
+            ProtocolTskVerifier::new(tsk, tsk_rust_protocol::TskServerConfig::default())
+                .with_verification_rate_limiter(tsk_limiter),
             authority,
             AuditContextKey::new(*secrets.audit_key),
         ),

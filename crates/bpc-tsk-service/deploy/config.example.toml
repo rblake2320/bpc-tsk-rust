@@ -7,6 +7,8 @@ max_header_count = 64
 max_header_bytes = 16384
 max_body_bytes = 1048576
 max_concurrency = 64
+# Mandatory bounded per-process TSK verification admission; the TLS edge also rate-limits.
+tsk_verification_per_minute = 6000
 blocking_admission = 16
 max_blocking_threads = 16
 worker_threads = 4

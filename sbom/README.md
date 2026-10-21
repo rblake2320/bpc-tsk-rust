@@ -4,13 +4,13 @@ This directory contains the all-feature dependency inventories for the two deplo
 
 | Field | Bridge core | Admission service |
 |---|---:|---:|
-| Source checkpoint | `47718fcc1f1bef82b5f144a6c904cfd5286bbbc0` | `47718fcc1f1bef82b5f144a6c904cfd5286bbbc0` |
+| Source checkpoint | production release tag `v0.1.0-production` | production release tag `v0.1.0-production` |
 | Product toolchain | Rust/Cargo 1.85.0 | Rust/Cargo 1.85.0 |
 | Generator | `cargo-cyclonedx-cyclonedx 0.5.9` | `cargo-cyclonedx-cyclonedx 0.5.9` |
 | Format | CycloneDX JSON 1.5; all Cargo features; all target dependency sets | CycloneDX JSON 1.5; all Cargo features; all target dependency sets |
 | Components | 229 | 239 |
 | File | `bridge-core-cyclonedx-all-features.json` | `service-cyclonedx-all-features.json` |
-| SHA-256 | `b051821cd571461b2b32d4a840c6c9952aff24691592b835aebe33aaadce8bf5` | `3d6cf62a931280deaa0770dac6252be51f8cf85b9d85d2182ce6c8dff3915f4b` |
+| SHA-256 | `109f1844dfa6bf55c9e6c338472f2b8585fa085d47ce57c050336096e3ac6c79` | `1c1f6113f844db175e550cda9dff8c3ac99ab5a4ced036ffce493361b448b469` |
 
 ## Reproduction
 

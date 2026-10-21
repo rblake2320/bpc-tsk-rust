@@ -3,9 +3,9 @@
 //! This crate composes independently verified BPC and TSK results. It never
 //! derives, copies, or exposes their secret material. The public result is
 //! either a generic denial with a correlation ID or an immutable authorization
-//! snapshot. It is deliberately not a production-readiness claim: durable
-//! authority deployment/fault validation and the full TSK HA authority remain
-//! separate required deployment gates.
+//! snapshot. The companion `bpc-tsk-service` wires the reviewed durable
+//! authorities and bounded private-edge admission into the production service;
+//! deployments must still provide their own private TLS edge and credentials.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +22,7 @@ pub mod postgres_authority;
 use std::{
     collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use bpc_protocol as bpc;
@@ -540,12 +540,29 @@ pub trait TskRequestVerifier: Send + Sync {
 pub struct ProtocolTskVerifier<S> {
     store: S,
     config: tsk::TskServerConfig,
+    limiter: Option<Arc<dyn tsk::VerificationRateLimiter>>,
 }
 
 impl<S> ProtocolTskVerifier<S> {
     /// Construct a TSK adapter from an independently owned TSK authority.
     pub fn new(store: S, config: tsk::TskServerConfig) -> Self {
-        Self { store, config }
+        Self {
+            store,
+            config,
+            limiter: None,
+        }
+    }
+
+    /// Apply an independent, bounded pre-lookup TSK verification limiter.
+    ///
+    /// The production service always supplies this control. It is deliberately
+    /// independent from BPC admission and never receives TSK secret material.
+    pub fn with_verification_rate_limiter(
+        mut self,
+        limiter: Arc<dyn tsk::VerificationRateLimiter>,
+    ) -> Self {
+        self.limiter = Some(limiter);
+        self
     }
 }
 
@@ -554,7 +571,16 @@ where
     S: tsk::TumblerStore,
 {
     fn verify(&self, request: &tsk::RequestData) -> Result<tsk::VerifyResult, TskVerifierError> {
-        tsk::verify_tsk_request(request, &self.store, self.config).map_err(|_| TskVerifierError)
+        let result = match &self.limiter {
+            Some(limiter) => tsk::verify_tsk_request_with_rate_limit(
+                request,
+                &self.store,
+                self.config,
+                limiter.as_ref(),
+            ),
+            None => tsk::verify_tsk_request(request, &self.store, self.config),
+        };
+        result.map_err(|_| TskVerifierError)
     }
 }
 
@@ -1246,6 +1272,53 @@ mod tests {
         assert_eq!(
             snapshot.tsk_response_headers().get("x-tsk-authenticated"),
             Some(&"1".to_owned())
+        );
+    }
+
+    #[test]
+    fn exhausted_tsk_limiter_denies_before_hotp_state_is_consumed() {
+        use tsk::{
+            InMemoryTumblerStore, MemoryStoreConfig, MemoryVerificationRateLimiter, TskConfig,
+            TskServerConfig, TumblerMapOptions, TumblerStore, generate_key_from_map,
+            generate_tumbler_map,
+        };
+
+        const NOW_MS: i64 = 1_750_000_000_000;
+        let store = InMemoryTumblerStore::new(MemoryStoreConfig {
+            max_entries: 100_000,
+            max_age_ms: 0,
+        })
+        .unwrap();
+        let map = generate_tumbler_map(TumblerMapOptions::default(), NOW_MS).unwrap();
+        let key = generate_key_from_map(&map, NOW_MS).unwrap();
+        store.set(&map.client_id, map.clone()).unwrap();
+        let request = tsk::RequestData::from_headers([
+            ("x-tsk-client-id".to_owned(), map.client_id.clone()),
+            ("x-tsk-key".to_owned(), key),
+            ("x-tsk-version".to_owned(), "1".to_owned()),
+        ]);
+        let config = TskServerConfig {
+            validation: TskConfig::default(),
+            now_ms: Some(NOW_MS),
+        };
+        let limiter = Arc::new(MemoryVerificationRateLimiter::new(1, NOW_MS).unwrap());
+        assert!(tsk::VerificationRateLimiter::allow(
+            limiter.as_ref(),
+            NOW_MS
+        ));
+        let limited =
+            ProtocolTskVerifier::new(store.clone(), config).with_verification_rate_limiter(limiter);
+        let denied = limited.verify(&request).unwrap();
+        assert!(!denied.ok);
+        assert_eq!(denied.error.as_deref(), Some("TSK_RATE_LIMIT_EXCEEDED"));
+
+        // The same valid HOTP key succeeds when inspected through an independent
+        // unrestricted adapter, proving the rate denial happened before TSK commit.
+        assert!(
+            ProtocolTskVerifier::new(store, config)
+                .verify(&request)
+                .unwrap()
+                .ok
         );
     }
 

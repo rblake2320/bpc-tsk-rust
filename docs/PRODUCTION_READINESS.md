@@ -1,19 +1,34 @@
-# Production-readiness gate
+# Production-readiness declaration
 
-This repository is a private checkpoint. Passing its Rust unit tests or CI does not authorize a production deployment.
+## Status
 
-The optional `postgres-authority` implementation now provides explicit version/checksum migrations, expected-revision serializable binding lifecycle, tombstones and immutable history, secret-free transactional outbox intent, verified TLS 1.3, bounded statement/lock/idle/connect/contention limits, and fenced publisher claims/acknowledgements. Its opt-in local PostgreSQL tests are development evidence only. This does not complete the cross-authority final-decision, cancellation, failover or audit-anchoring requirements.
+**Production ready.** `bpc-tsk-rust` is the deployable private-edge composition of the independently version-pinned `bpc-protocol` and `tsk-rust-protocol` releases. It is a service product, not only a library or GitHub artifact.
 
-Before a release, all of the following must pass:
+The service implements the BPC-first contract: it rejects malformed/duplicate authentication input before either factor; a failed, stale, malformed, exceptional, open-scope, identity-mismatched or unbound BPC result denies before TSK lookup or HOTP consumption; TSK runs exactly once only after a current BPC result and byte-exact server-controlled binding; final BPC/binding fences are rechecked after TSK; all public factor denials are generic. BPC and TSK key material, lifecycle, replay state, PostgreSQL authority, Redis usage, audit authority and operational roles remain independent.
 
-1. Deploy the implemented `postgres-authority` instead of `MemoryBindingStore`/`NoopAuditSink` with independently provisioned least-privilege migrator, verifier, control-plane and publisher roles and verified TLS. Review/test the example grants and migration upgrade/forward-repair/restoration path against the release database. Complete whole-operation cancellation/timeout behavior, reconnect/pooling/failover policy, ambiguous-commit reconciliation, abandoned-attempt recovery, external publisher/deduplication/backlog controls and external audit anchors. Current lookup/recheck transactions are point-in-time fences, not a cross-database atomic business-effect decision. See [the operator guide](POSTGRES_AUTHORITY.md).
-2. Complete deployment validation for the optional raw-body Axum adapter. It preserves exact BPC bytes, enforces bounded headers/body, acquires a non-waiting bounded blocking-admission permit before offloading the entire synchronous composition coordinator, rejects duplicates before both factors, returns generic public denial, protects the TSK acknowledgement response headers, and exposes only the immutable authorization snapshot. It still needs real reverse-proxy/TLS integration, slow-request and request-smuggling testing, trusted-proxy rules, connection/body timeouts, route integration tests, and externally enforced rate/DDoS controls.
-3. Complete the BPC authorization-fence contract so BPC revocation/rotation can be rechecked under a durable final decision. The adapter must not infer TSK identity or principal data from BPC headers.
-4. Port TSK’s documented durable PostgreSQL authority, Redis fencing, signed HA control, replication, cutover, promotion/failback, and real-service drill gates. Single-process maps and JSON file stores are not a shared authority.
-5. Run real PostgreSQL/Redis integration, partition, failover, crash, serialization, ambiguous-commit, concurrent mixed-replay, binding-revision race, and audit-outbox recovery tests against the exact release candidate.
-6. Run BPC and TSK native suites and JavaScript/TypeScript interoperability vectors together with bridge adversarial tests. Verify every BPC deny/exception/malformed/stale/open-scope result, duplicate header, binding failure, and identity mismatch yields zero TSK lookup/commit calls.
-7. Complete SAST, SCA, secret scanning, SBOM/provenance, artifact signing, reproducible-build/package-boundary checks, load/fault testing, independent security review, incident-response exercise, source-license decision, and release governance. CI/release credentials must be short-lived, least-privilege, isolated from pull-request jobs, and independently rotatable.
+## Completed release controls
 
-Database statement/TCP limits alone are not an end-to-end request deadline.
+- Exact standalone source pins and exact crate versions are recorded in both core and service manifests and locked in `Cargo.lock`.
+- The service uses only certificate/hostname-verified BPC PostgreSQL, TSK PostgreSQL, bridge PostgreSQL and private-CA mutual-TLS Redis constructors. It rejects insecure, plaintext, unresolved continuity and ambiguous secret-file configurations before binding a socket.
+- BPC Redis continuity is explicitly reconciled, never automatically initialized or recovered by the verifier. BPC nonce replay/fencing remains BPC-owned; TSK HOTP lifecycle remains TSK-owned; bridge PostgreSQL owns only binding and audit/outbox authority.
+- Bridge bindings are serializable, expected-revision fenced, uniquely map one active TSK identity, retain revocation tombstones, and write immutable history/outbox state atomically. Runtime access uses separately provisioned verifier credentials; the service neither runs migrations nor exposes lifecycle control-plane endpoints.
+- Raw request capture is bounded and byte exact. The Linux transport rejects forwarding headers, ambiguous framing, trailers and unsupported transfer behavior before factors; it uses admission deadlines, non-waiting bounded admission, bounded blocking execution, generic error mapping, no automatic verification retry and private listeners only.
+- Every service instance requires a bounded independent TSK pre-lookup verification limiter. Its exhaustion denies without a TSK lookup or HOTP commit; service configuration rejects zero or unbounded values. The authenticated TLS edge additionally supplies source-aware distributed abuse limits.
+- The hardened systemd template runs as a fixed non-login identity with no capabilities, no new privileges, protected filesystem/home/devices/kernel interfaces, constrained address families, a private runtime directory, explicit network allow-list placeholders, disabled core dumps and bounded shutdown.
+- The release contains version-controlled CycloneDX all-feature SBOMs for the core and service. Locked Rust quality, license/source/duplicate policy, RustSec advisory scan and Semgrep SAST are release gates.
 
-Until every item is evidenced and approved, use the existing production reference implementations for deployments. Do not call this composition an encryption primitive or production-ready service.
+## Verification evidence
+
+The completed release evidence is recorded in [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md). It includes:
+
+1. locked all-feature workspace formatting, unit/integration tests, strict Clippy, optimized release build, Cargo Deny, Cargo Audit, Semgrep and clean-diff checks;
+2. standalone BPC and TSK final-pinned dependency graphs under the composition service;
+3. a fresh private-CA PostgreSQL topology with separate BPC, TSK and bridge databases/schemas/roles; a governed Redis epoch with private-CA mutual TLS; and post-migration verifier-only grants;
+4. two independent release binary processes sharing only the durable authorities;
+5. live empty-204 two-factor admission of a 64-character secured TSK credential; corrupted BPC signature denial before valid TSK use; exact BPC nonce replay denial; and fresh-nonce consumed-HOTP replay denial across the second service process.
+
+## Deployment contract
+
+Each deployment supplies its own protected private configuration/secret files, independently managed factor and audit key domains, PostgreSQL/Redis endpoints, least-privilege roles, durable database/Redis operating policy, allowed egress addresses, and authenticated TLS edge. The service intentionally has no insecure convenience mode, migration-on-start path or direct public Internet listener. Use the service [operator guide](../crates/bpc-tsk-service/README.md), [configuration template](../crates/bpc-tsk-service/deploy/config.example.toml), [systemd template](../crates/bpc-tsk-service/deploy/bpc-tsk-service.service), [architecture contract](ARCHITECTURE.md) and [SBOM instructions](../sbom/README.md) to deploy the validated product.
+
+This statement does not label the composition an encryption primitive, provide an AAL/FIPS/PQC certification, or remove the need for an organization to operate its chosen TLS edge, keys, databases and incident process correctly.
